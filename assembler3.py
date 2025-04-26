@@ -6,7 +6,7 @@ import warnings
 import glob
 import datetime
 
-# Instruction set with reads_ram and writes_ram for RAM access tracking
+# Instruction set for 8-bit SAP computer
 instruction_set = {
     "nop": {"opcode": "0000", "operand": "none", "reads_ram": False, "writes_ram": False},
     "lda": {"opcode": "0001", "operand": "address", "reads_ram": True, "writes_ram": False},
@@ -77,7 +77,7 @@ def program_menu():
             print("Enter a number.")
 
 def validate_instruction(line, symbol_table=None, max_address=15):
-    """Validate an instruction's syntax. Returns (is_valid, error_message)."""
+    """Validate instruction syntax. Returns (is_valid, error_message)."""
     line = line.split(";")[0].strip()
     if not line:
         return True, None
@@ -85,6 +85,18 @@ def validate_instruction(line, symbol_table=None, max_address=15):
         line = line.split(":")[1].strip()
     if not line:
         return True, None
+    if line.startswith("#ram"):
+        parts = line.split()
+        if len(parts) != 3:
+            return False, f"Invalid #ram directive: {line}"
+        try:
+            ram_addr = int(parts[1], 0)
+            ram_value = int(parts[2], 0)
+            if ram_addr > max_address or ram_value > max_address:
+                return False, f"RAM address or value out of range: {line}"
+            return True, None
+        except ValueError:
+            return False, f"Invalid #ram address or value: {line}"
     match = re.match(r"(\w+)\s*(?:\[(\w+)\]|(\w+))?", line, re.IGNORECASE)
     if not match:
         return False, f"Invalid syntax: {line}"
@@ -99,7 +111,7 @@ def validate_instruction(line, symbol_table=None, max_address=15):
     if operand_type != "none" and not operand:
         return False, f"Instruction {instr} requires an operand"
     if operand_type in ["address", "value"]:
-        if operand in symbol_table:
+        if symbol_table and operand in symbol_table:
             return True, None
         try:
             value = int(operand, 0)
@@ -110,23 +122,31 @@ def validate_instruction(line, symbol_table=None, max_address=15):
             return False, f"Invalid operand (must be number or label): {operand}"
     return True, None
 
+def check_constraints(machine_code, initialized_ram, ram_init, max_instructions=16, max_address=15):
+    """Check for program size, RAM size, or uninitialized RAM issues. Returns list of issues."""
+    issues = []
+    if len(machine_code) > max_instructions:
+        issues.append(f"Program exceeds maximum of {max_instructions} instructions ({len(machine_code)} instructions)")
+    total_addresses = len(machine_code) + len(initialized_ram) + len(ram_init)
+    if total_addresses > max_address + 1:
+        issues.append(f"Total address space exceeds {max_address + 1} addresses ({total_addresses} used)")
+    return issues
+
 def assemble(code, max_instructions=16, max_address=15, strict_ram_check=False, opcode_bits=4, operand_bits=4):
     """Assemble code for SAP computer. Returns machine_code, ram_init, instruction_lines, initialized_ram, symbol_table."""
     symbol_table = {}
     machine_code = []
-    ram_init = {}  # Store RAM initial values (address: value)
-    initialized_ram = set()  # Track initialized RAM addresses
+    ram_init = {}
+    initialized_ram = set()
     address = 0
-    instruction_lines = []  # Store (binary, assembly_line) pairs
+    instruction_lines = []
 
-    # Validate bit widths
     if opcode_bits + operand_bits != 8:
         raise ValueError(f"Opcode bits ({opcode_bits}) + operand bits ({operand_bits}) must equal 8")
 
-    # First pass: Build symbol table and check instruction count
     lines = code.splitlines()
     for line in lines:
-        line = line.split(";")[0].strip()  # Remove comments for parsing
+        line = line.split(";")[0].strip()
         full_line = line.split(";")[0].rstrip() + (" ;" + ";".join(line.split(";")[1:]) if ";" in line else "")
         if not line:
             continue
@@ -154,7 +174,6 @@ def assemble(code, max_instructions=16, max_address=15, strict_ram_check=False, 
         if address > max_instructions:
             raise ValueError(f"Program exceeds maximum of {max_instructions} instructions")
 
-    # Generate RAM initialization instructions
     for ram_addr, ram_value in ram_init.items():
         ldi_binary = f"{instruction_set['ldi']['opcode']}{format(ram_value, f'0{operand_bits}b')}"
         sta_binary = f"{instruction_set['sta']['opcode']}{format(ram_addr, f'0{operand_bits}b')}"
@@ -167,7 +186,6 @@ def assemble(code, max_instructions=16, max_address=15, strict_ram_check=False, 
         if address > max_instructions:
             raise ValueError(f"Program with RAM init exceeds {max_instructions} instructions")
 
-    # Second pass: Generate machine code
     address = len(machine_code)
     for raw_line in lines:
         full_line = raw_line.rstrip()
@@ -264,20 +282,6 @@ def print_listing(instruction_lines, show_switches=False, show_comments=True, sy
             line += f" {comment}"
         print(line)
 
-
-def check_constraints(machine_code, initialized_ram, ram_init, max_instructions=16, max_address=15):
-    """Check for program size, RAM size, or uninitialized RAM issues. Returns list of issues."""
-    issues = []
-    # Check program size
-    if len(machine_code) > max_instructions:
-        issues.append(f"Program exceeds maximum of {max_instructions} instructions ({len(machine_code)} instructions)")
-    # Check total address space (instructions + RAM)
-    total_addresses = len(machine_code) + len(initialized_ram) + len(ram_init)
-    if total_addresses > max_address + 1:
-        issues.append(f"Total address space exceeds {max_address + 1} addresses ({total_addresses} used)")
-    # Uninitialized RAM warnings are handled in assemble (warnings.warn)
-    return issues
-
 def to_listing_file(instruction_lines, filename="program.lst", show_switches=False, show_comments=True, symbol_table=None):
     """Write assembly listing to file."""
     with open(filename, "w") as f:
@@ -321,21 +325,23 @@ def to_hex_file(machine_code, filename="program.hex"):
             f.write(f"{int(binary, 2):02X}\n")
 
 def live_mode():
-    """Interactive mode to enter and assemble instructions with real-time syntax checking."""
+    """Interactive mode to enter and assemble instructions with pre-assembly warnings."""
     print("Entering Live Mode. Type instructions (one per line). Enter empty line to assemble.")
     print("Use Ctrl+C to exit.")
     instructions = []
-    temp_symbol_table = {}  # Track labels for validation
+    temp_symbol_table = {}
     line_number = 0
+    uninitialized_warnings = []
+    def capture_warnings(message, category, filename, lineno, file=None, line=None):
+        uninitialized_warnings.append(str(message))
+    warnings.showwarning = capture_warnings
     while True:
         try:
             line = input(f"[{line_number}]> ").strip()
-            # Check for label
             if ":" in line:
                 label = line.split(":")[0].strip()
                 if label:
-                    temp_symbol_table[label] = "0" * 4  # Dummy address for validation
-            # Validate instruction
+                    temp_symbol_table[label] = "0" * 4
             is_valid, error = validate_instruction(line, temp_symbol_table)
             if not is_valid:
                 print(f"Error: {error}")
@@ -344,7 +350,7 @@ def live_mode():
                     continue
                 elif action == "a" and instructions:
                     line = ""
-                else:  # Skip or invalid
+                else:
                     line_number += 1
                     continue
             if not line:
@@ -352,37 +358,39 @@ def live_mode():
                     print("No instructions entered. Continuing...")
                     continue
                 code = "\n".join(instructions)
-                show_switches = input("Show switch settings? (y/n): ").lower() == 'y'
-                show_comments = input("Show comments? (y/n): ").lower() == 'y'
-                generate_hex = input("Generate hex file? (y/n): ").lower() == 'y'
-                generate_listing = input("Generate listing file? (y/n): ").lower() == 'y'
-                save = input("Save program to history? (y/n): ").lower() == 'y'
-                prog_name = None
-                if save:
-                    prog_name = input("Program name (leave blank for auto-generated): ").strip() or None
                 try:
+                    uninitialized_warnings.clear()
                     machine_code, ram_init, instruction_lines, initialized_ram, symbol_table = assemble(
                         code, strict_ram_check=False
                     )
-                    # Check constraints before file generation
-                    issues = check_constraints(machine_code, initialized_ram, ram_init, max_instructions=16, max_address=15)
-                    if issues:
+                    issues = check_constraints(machine_code, initialized_ram, ram_init)
+                    if issues or uninitialized_warnings:
                         print("\nIssues detected:")
                         for issue in issues:
                             print(f"- {issue}")
-                        if generate_hex or generate_listing:
-                            action = input("Fix code (f), continue (c), or cancel (x)? ").lower()
-                            if action == "f":
-                                print("Edit instructions in live mode. Enter empty line to re-assemble.")
-                                instructions = code.splitlines()
-                                temp_symbol_table = {k: v for k, v in symbol_table.items()}
-                                continue
-                            elif action == "x":
-                                print("Assembly canceled.")
-                                instructions = []
-                                temp_symbol_table = {}
-                                line_number = 0
-                                continue
+                        for warning in uninitialized_warnings:
+                            print(f"- {warning}")
+                        action = input("Fix code (f), continue (c), or cancel (x)? ").lower()
+                        if action == "f":
+                            print("Edit instructions in live mode. Enter empty line to re-assemble.")
+                            instructions = code.splitlines()
+                            temp_symbol_table = {k: v for k, v in symbol_table.items()}
+                            continue
+                        elif action == "x":
+                            print("Assembly canceled.")
+                            instructions = []
+                            temp_symbol_table = {}
+                            line_number = 0
+                            continue
+                    # Output prompts only after resolving issues
+                    show_switches = input("Show switch settings? (y/n): ").lower() == 'y'
+                    show_comments = input("Show comments? (y/n): ").lower() == 'y'
+                    generate_hex = input("Generate hex file? (y/n): ").lower() == 'y'
+                    generate_listing = input("Generate listing file? (y/n): ").lower() == 'y'
+                    save = input("Save program to history? (y/n): ").lower() == 'y'
+                    prog_name = None
+                    if save:
+                        prog_name = input("Program name (leave blank for auto-generated): ").strip() or None
                     print_listing(
                         instruction_lines,
                         show_switches=show_switches,
@@ -423,6 +431,7 @@ def live_mode():
         except KeyboardInterrupt:
             print("\nExiting Live Mode.")
             break
+    warnings.showwarning = warnings.defaultaction
 
 def main():
     parser = argparse.ArgumentParser(description="SAP Assembler for 8-bit breadboard computer")
@@ -457,25 +466,31 @@ def main():
         prog_name = os.path.splitext(os.path.basename(args.input_file))[0]
 
     try:
+        uninitialized_warnings = []
+        def capture_warnings(message, category, filename, lineno, file=None, line=None):
+            uninitialized_warnings.append(str(message))
+        warnings.showwarning = capture_warnings
         machine_code, ram_init, instruction_lines, initialized_ram, symbol_table = assemble(
             code, strict_ram_check=False
         )
-        # Check constraints before file generation
+        warnings.showwarning = warnings.defaultaction
         issues = check_constraints(machine_code, initialized_ram, ram_init)
-        if issues:
+        if issues or uninitialized_warnings:
             print("\nIssues detected:")
             for issue in issues:
                 print(f"- {issue}")
+            for warning in uninitialized_warnings:
+                print(f"- {warning}")
             if args.generate_hex or args.generate_listing:
                 action = input("Fix code (f), continue (c), or cancel (x)? ").lower()
                 if action == "f":
                     print("Edit code in a text editor and re-run. Suggested fixes:")
                     if len(machine_code) > 16:
-                        print("- Reduce program size (current: {len(machine_code)} instructions)")
+                        print(f"- Reduce program size (current: {len(machine_code)} instructions)")
                     if len(machine_code) + len(initialized_ram) + len(ram_init) > 16:
                         print("- Reduce RAM usage or instructions")
-                    for addr in initialized_ram - set(ram_init):
-                        print(f"- Add `#ram {addr} 0` to initialize RAM[{addr}]")
+                    for warning in uninitialized_warnings:
+                        print(f"- {warning}")
                     return
                 elif action == "x":
                     print("Assembly canceled.")
@@ -509,6 +524,7 @@ def main():
         print(f"Program saved as {prog_name}.")
     except Exception as e:
         print(f"Assembly error: {e}")
+
 
 if __name__ == "__main__":
     main()

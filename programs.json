@@ -8,5 +8,15 @@
     "name": "counter-test",
     "filename": "programs/counter-test.asm",
     "timestamp": "2025-04-25T20:27:30.662255"
+  },
+  {
+    "name": "multiply",
+    "filename": "programs/multiply.asm",
+    "timestamp": "2025-04-25T21:04:41.869336"
+  },
+  {
+    "name": "fibonacci sequence",
+    "filename": "programs/fibonacci sequence.asm",
+    "timestamp": "2025-04-25T21:34:57.292147"
   }
 ]
